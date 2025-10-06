@@ -61,9 +61,33 @@ rc-service sshd restart || true
 echo "=== [6/6] 清理缓存 ==="
 apk cache clean || true
 
+echo "=== [附加检测] 检查是否需要重启 ==="
+# 检查当前内核与已安装内核版本是否一致
+CURRENT_KERNEL=$(uname -r 2>/dev/null || echo "unknown")
+INSTALLED_KERNEL=$(apk info -v | grep '^linux-' | head -n1 | awk '{print $1}')
+
+if [ -n "$INSTALLED_KERNEL" ] && [ "$CURRENT_KERNEL" != "unknown" ]; then
+    if ! echo "$CURRENT_KERNEL" | grep -q "$(echo "$INSTALLED_KERNEL" | cut -d'-' -f2-)"; then
+        echo "⚠️ 检测到系统已安装新内核 ($INSTALLED_KERNEL)"
+        echo "当前运行内核版本: $CURRENT_KERNEL"
+        echo "👉 建议执行 reboot 以加载新内核"
+        NEED_REBOOT=1
+    else
+        echo "✅ 当前内核 ($CURRENT_KERNEL) 已是最新，无需重启。"
+        NEED_REBOOT=0
+    fi
+else
+    echo "ℹ️ 无法检测内核版本，可能是非标准虚拟机或精简系统。"
+    NEED_REBOOT=0
+fi
+
 echo "==============================================="
 echo "✅ 优化完成!"
-echo "如果你设置了 NAT 端口映射，请用以下命令登录："
-echo "ssh root@<你的公网IP> -p $PORT"
+echo "SSH 登录方式：ssh root@<你的公网IP> -p $PORT"
 echo "未指定 PORT 时默认 22"
+if [ "$NEED_REBOOT" -eq 1 ]; then
+    echo "⚠️ 建议现在执行：reboot"
+else
+    echo "✅ 无需重启，可立即使用。"
+fi
 echo "==============================================="
