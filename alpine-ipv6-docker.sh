@@ -48,35 +48,49 @@ cat > "$DOCKER_DAEMON_JSON" <<EOF
 EOF
 
 # -----------------------------
-# 5️⃣ 后台启动 Docker daemon
+# 5️⃣ 后台启动 Docker daemon并等待启动完成
 # -----------------------------
 echo "⚡ 启动 Docker daemon..."
 dockerd -H unix:///var/run/docker.sock > /var/log/docker.log 2>&1 &
-sleep 5
+
+# 等待 Docker daemon 启动
+for i in $(seq 1 10); do
+    if docker info >/dev/null 2>&1; then
+        echo "✅ Docker daemon 已启动"
+        break
+    fi
+    echo "⌛ 等待 Docker daemon 启动... ($i/10)"
+    sleep 2
+done
 
 if ! docker info >/dev/null 2>&1; then
     echo "❌ Docker daemon 启动失败，请查看 /var/log/docker.log"
     exit 1
 fi
-echo "✅ Docker daemon 已启动"
 
 # -----------------------------
-# 6️⃣ 配置 IPv6 NAT
+# 6️⃣ 配置 IPv6 NAT（有条件执行）
 # -----------------------------
 echo "🌐 配置 IPv6 NAT..."
 sysctl -w net.ipv6.conf.all.forwarding=1
-ip6tables -t nat -A POSTROUTING -s $DEFAULT_IPV6_SUBNET ! -o docker0 -j MASQUERADE || true
+
+if ip6tables -t nat -L >/dev/null 2>&1; then
+    ip6tables -t nat -A POSTROUTING -s $DEFAULT_IPV6_SUBNET ! -o docker0 -j MASQUERADE || true
+else
+    echo "⚠️ IPv6 NAT 表不存在，跳过 MASQUERADE"
+fi
 
 # -----------------------------
 # 7️⃣ 创建自定义 IPv6 网络（不触碰默认 bridge）
 # -----------------------------
 echo "🔧 创建自定义 IPv6 bridge 网络 ipv6bridge..."
+docker network inspect ipv6bridge >/dev/null 2>&1 || \
 docker network create \
-  --ipv6 \
-  --subnet=$DEFAULT_IPV6_SUBNET \
-  --gateway=fd00:dead:beef::1 \
-  -o com.docker.network.bridge.enable_icc=true \
-  ipv6bridge || true
+    --ipv6 \
+    --subnet=$DEFAULT_IPV6_SUBNET \
+    --gateway=fd00:dead:beef::1 \
+    -o com.docker.network.bridge.enable_icc=true \
+    ipv6bridge
 
 # -----------------------------
 # 8️⃣ 输出安装完成信息
