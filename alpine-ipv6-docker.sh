@@ -1,10 +1,10 @@
 #!/bin/sh
 # =========================================================
-# Alpine 3.14 OpenVZ/LXC 一键 IPv6 Docker 安装脚本
+# Alpine 3.14 OpenVZ/LXC 一键 IPv6 Docker 安装脚本（优化版）
 # =========================================================
 set -e
 
-echo "🚀 Alpine 一键安装 Docker + Docker Compose + IPv6 (OpenVZ/LXC 优化版)"
+echo "🚀 Alpine 一键安装 Docker + Docker Compose + IPv6 (OpenVZ/LXC 安全版)"
 
 # -----------------------------
 # 1️⃣ 安装基础工具
@@ -30,7 +30,7 @@ if [ ! -f "$DOCKER_COMPOSE_BIN" ]; then
 fi
 
 # -----------------------------
-# 4️⃣ 配置 Docker daemon（IPv6 + 禁用 IPv4 NAT）
+# 4️⃣ 配置 Docker daemon.json
 # -----------------------------
 DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
 DEFAULT_IPV6_SUBNET="fd00:dead:beef::/48"
@@ -53,40 +53,37 @@ echo "⚡ 启动 Docker daemon..."
 dockerd -H unix:///var/run/docker.sock > /var/log/docker.log 2>&1 &
 sleep 5
 
-# 检查 Docker 是否启动成功
 if ! docker info >/dev/null 2>&1; then
-    echo "❌ Docker daemon 启动失败，请检查 /var/log/docker.log"
+    echo "❌ Docker daemon 启动失败，请查看 /var/log/docker.log"
     exit 1
 fi
 echo "✅ Docker daemon 已启动"
 
 # -----------------------------
-# 6️⃣ 配置 IPv6 NAT（容器可访问公网 IPv6）
+# 6️⃣ 配置 IPv6 NAT
 # -----------------------------
 echo "🌐 配置 IPv6 NAT..."
 sysctl -w net.ipv6.conf.all.forwarding=1
 ip6tables -t nat -A POSTROUTING -s $DEFAULT_IPV6_SUBNET ! -o docker0 -j MASQUERADE || true
 
 # -----------------------------
-# 7️⃣ 创建 Docker 默认 IPv6 网络
+# 7️⃣ 创建自定义 IPv6 网络（不触碰默认 bridge）
 # -----------------------------
-echo "🔧 创建默认 IPv6 bridge 网络..."
-docker network rm bridge >/dev/null 2>&1 || true
+echo "🔧 创建自定义 IPv6 bridge 网络 ipv6bridge..."
 docker network create \
   --ipv6 \
   --subnet=$DEFAULT_IPV6_SUBNET \
   --gateway=fd00:dead:beef::1 \
-  -o com.docker.network.bridge.name=bridge \
   -o com.docker.network.bridge.enable_icc=true \
-  bridge
+  ipv6bridge || true
 
 # -----------------------------
-# 8️⃣ 验证安装
+# 8️⃣ 输出安装完成信息
 # -----------------------------
 echo "🎉 安装完成！"
 echo "📌 Docker IPv6 默认子网: $DEFAULT_IPV6_SUBNET"
-echo "💡 测试 Docker IPv6:"
-echo "docker run --rm alpine ping6 -c 2 google.com"
+echo "💡 启动容器请使用自定义网络：--network ipv6bridge"
+echo "示例：docker run --rm --network ipv6bridge alpine ping6 -c 2 google.com"
 
 docker version
 docker-compose version
