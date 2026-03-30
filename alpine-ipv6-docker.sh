@@ -1,10 +1,10 @@
 #!/bin/sh
 # =========================================================
-# Alpine 3.14 OpenVZ/LXC 一键 IPv6 Docker 安装脚本（优化版）
+# Alpine 3.14 OpenVZ/LXC 一键 IPv6 Docker 安装脚本（vfs 存储驱动）
 # =========================================================
 set -e
 
-echo "🚀 Alpine 一键安装 Docker + Docker Compose + IPv6 (OpenVZ/LXC 安全版)"
+echo "🚀 Alpine 一键安装 Docker + Docker Compose + IPv6 (OpenVZ vfs 专用版)"
 
 # -----------------------------
 # 1️⃣ 安装基础工具
@@ -30,7 +30,7 @@ if [ ! -f "$DOCKER_COMPOSE_BIN" ]; then
 fi
 
 # -----------------------------
-# 4️⃣ 配置 Docker daemon.json
+# 4️⃣ 配置 Docker daemon.json（IPv6 + vfs 存储驱动）
 # -----------------------------
 DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
 DEFAULT_IPV6_SUBNET="fd00:dead:beef::/48"
@@ -42,7 +42,8 @@ cat > "$DOCKER_DAEMON_JSON" <<EOF
   "ipv6": true,
   "fixed-cidr-v6": "$DEFAULT_IPV6_SUBNET",
   "iptables": false,
-  "ip-masq": false
+  "ip-masq": false,
+  "storage-driver": "vfs"
 }
 EOF
 
