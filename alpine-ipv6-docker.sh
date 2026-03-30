@@ -1,17 +1,29 @@
 #!/bin/sh
 # =========================================================
-# Alpine 3.14 OpenVZ/LXC 一键 IPv6 Docker 安装脚本（vfs 存储驱动）
+# Alpine Docker + IPv6 终极一键脚本（OpenVZ / KVM 自适应）
 # =========================================================
 set -e
 
-echo "🚀 Alpine 一键安装 Docker + Docker Compose + IPv6 (OpenVZ vfs 专用版)"
+echo "🚀 Alpine Docker + IPv6 终极安装脚本"
+
+# -----------------------------
+# 0️⃣ 检测虚拟化环境
+# -----------------------------
+VIRT="unknown"
+if grep -qa openvz /proc/1/environ 2>/dev/null; then
+    VIRT="openvz"
+elif grep -qa lxc /proc/1/environ 2>/dev/null; then
+    VIRT="lxc"
+fi
+
+echo "🧠 虚拟化环境: $VIRT"
 
 # -----------------------------
 # 1️⃣ 安装基础工具
 # -----------------------------
-echo "📦 更新 APK 源并安装基础工具..."
+echo "📦 安装基础组件..."
 apk update
-apk add --no-cache bash curl socat ip6tables openrc iptables
+apk add --no-cache bash curl iptables ip6tables socat
 
 # -----------------------------
 # 2️⃣ 安装 Docker
@@ -20,85 +32,107 @@ echo "🐳 安装 Docker..."
 apk add --no-cache docker
 
 # -----------------------------
-# 3️⃣ 安装 Docker Compose（官方二进制）
+# 3️⃣ 安装 Docker Compose
 # -----------------------------
-DOCKER_COMPOSE_BIN="/usr/local/bin/docker-compose"
-if [ ! -f "$DOCKER_COMPOSE_BIN" ]; then
+if [ ! -f /usr/local/bin/docker-compose ]; then
     echo "📦 安装 Docker Compose..."
-    curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" -o "$DOCKER_COMPOSE_BIN"
-    chmod +x "$DOCKER_COMPOSE_BIN"
+    curl -L https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
+    chmod +x /usr/local/bin/docker-compose
 fi
 
 # -----------------------------
-# 4️⃣ 配置 Docker daemon.json（IPv6 + vfs 存储驱动）
+# 4️⃣ 自动选择存储驱动
 # -----------------------------
-DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
-DEFAULT_IPV6_SUBNET="fd00:dead:beef::/48"
+STORAGE="overlay2"
+if [ "$VIRT" = "openvz" ] || [ "$VIRT" = "lxc" ]; then
+    STORAGE="vfs"
+fi
 
-echo "🔧 配置 Docker daemon.json..."
+echo "🧠 使用存储驱动: $STORAGE"
+
+# -----------------------------
+# 5️⃣ 自动生成 IPv6 子网（避免冲突）
+# -----------------------------
+HEX=$(hexdump -n2 -e '/2 "%04x"' /dev/urandom)
+IPV6_SUBNET="fd00:${HEX}:dead::/64"
+IPV6_GATEWAY="fd00:${HEX}:dead::1"
+
+echo "🌐 IPv6 子网: $IPV6_SUBNET"
+
+# -----------------------------
+# 6️⃣ 写入 daemon.json
+# -----------------------------
 mkdir -p /etc/docker
-cat > "$DOCKER_DAEMON_JSON" <<EOF
+cat > /etc/docker/daemon.json <<EOF
 {
   "ipv6": true,
-  "fixed-cidr-v6": "$DEFAULT_IPV6_SUBNET",
+  "fixed-cidr-v6": "$IPV6_SUBNET",
   "iptables": false,
   "ip-masq": false,
-  "storage-driver": "vfs"
+  "storage-driver": "$STORAGE"
 }
 EOF
 
 # -----------------------------
-# 5️⃣ 后台启动 Docker daemon并等待启动完成
+# 7️⃣ 启动 Docker
 # -----------------------------
-echo "⚡ 启动 Docker daemon..."
-dockerd -H unix:///var/run/docker.sock > /var/log/docker.log 2>&1 &
+echo "⚡ 启动 Docker..."
+killall dockerd 2>/dev/null || true
+dockerd > /var/log/docker.log 2>&1 &
 
-# 等待 Docker daemon 启动
-for i in $(seq 1 10); do
+# 等待启动
+for i in $(seq 1 15); do
     if docker info >/dev/null 2>&1; then
-        echo "✅ Docker daemon 已启动"
+        echo "✅ Docker 启动成功"
         break
     fi
-    echo "⌛ 等待 Docker daemon 启动... ($i/10)"
+    echo "⌛ 等待 Docker 启动... ($i)"
     sleep 2
 done
 
 if ! docker info >/dev/null 2>&1; then
-    echo "❌ Docker daemon 启动失败，请查看 /var/log/docker.log"
+    echo "❌ Docker 启动失败"
+    tail -n 50 /var/log/docker.log
     exit 1
 fi
 
 # -----------------------------
-# 6️⃣ 配置 IPv6 NAT（有条件执行）
+# 8️⃣ IPv6 转发
 # -----------------------------
-echo "🌐 配置 IPv6 NAT..."
+echo "🌐 启用 IPv6 转发..."
 sysctl -w net.ipv6.conf.all.forwarding=1
 
+# NAT（如果支持）
 if ip6tables -t nat -L >/dev/null 2>&1; then
-    ip6tables -t nat -A POSTROUTING -s $DEFAULT_IPV6_SUBNET ! -o docker0 -j MASQUERADE || true
+    ip6tables -t nat -A POSTROUTING -s $IPV6_SUBNET ! -o docker0 -j MASQUERADE || true
+    echo "✅ IPv6 NAT 已配置"
 else
-    echo "⚠️ IPv6 NAT 表不存在，跳过 MASQUERADE"
+    echo "⚠️ IPv6 NAT 不支持（OpenVZ 常见）"
 fi
 
 # -----------------------------
-# 7️⃣ 创建自定义 IPv6 网络（不触碰默认 bridge）
+# 9️⃣ 创建 IPv6 网络（安全）
 # -----------------------------
-echo "🔧 创建自定义 IPv6 bridge 网络 ipv6bridge..."
+echo "🔧 创建 IPv6 网络..."
+
 docker network inspect ipv6bridge >/dev/null 2>&1 || \
 docker network create \
-    --ipv6 \
-    --subnet=$DEFAULT_IPV6_SUBNET \
-    --gateway=fd00:dead:beef::1 \
-    -o com.docker.network.bridge.enable_icc=true \
-    ipv6bridge
+  --ipv6 \
+  --subnet=$IPV6_SUBNET \
+  --gateway=$IPV6_GATEWAY \
+  ipv6bridge || true
 
 # -----------------------------
-# 8️⃣ 输出安装完成信息
+# 🔟 完成
 # -----------------------------
+echo ""
 echo "🎉 安装完成！"
-echo "📌 Docker IPv6 默认子网: $DEFAULT_IPV6_SUBNET"
-echo "💡 启动容器请使用自定义网络：--network ipv6bridge"
-echo "示例：docker run --rm --network ipv6bridge alpine ping6 -c 2 google.com"
-
-docker version
-docker-compose version
+echo "-----------------------------------"
+docker info | grep "Storage Driver"
+echo "-----------------------------------"
+echo "💡 IPv6 网络: ipv6bridge"
+echo "💡 测试命令:"
+echo "docker run --rm --network ipv6bridge alpine ping6 -c 2 google.com"
+echo ""
+echo "💡 host 网络模式（你现在用的）："
+echo "👉 docker-compose 直接用 network_mode: host 即可"
