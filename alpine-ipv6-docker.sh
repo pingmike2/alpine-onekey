@@ -1,25 +1,13 @@
 #!/bin/sh
 # =========================================================
-# Alpine Docker + IPv6 终极一键脚本（OpenVZ / KVM 自适应）
+# Alpine OpenVZ Docker + IPv6 无敌版（100% 防翻车）
 # =========================================================
 set -e
 
-echo "🚀 Alpine Docker + IPv6 终极安装脚本"
+echo "🚀 Alpine Docker + IPv6 无敌版启动"
 
 # -----------------------------
-# 0️⃣ 检测虚拟化环境
-# -----------------------------
-VIRT="unknown"
-if grep -qa openvz /proc/1/environ 2>/dev/null; then
-    VIRT="openvz"
-elif grep -qa lxc /proc/1/environ 2>/dev/null; then
-    VIRT="lxc"
-fi
-
-echo "🧠 虚拟化环境: $VIRT"
-
-# -----------------------------
-# 1️⃣ 安装基础工具
+# 1️⃣ 安装基础组件
 # -----------------------------
 echo "📦 安装基础组件..."
 apk update
@@ -41,26 +29,22 @@ if [ ! -f /usr/local/bin/docker-compose ]; then
 fi
 
 # -----------------------------
-# 4️⃣ 自动选择存储驱动
+# 4️⃣ 强制使用 vfs（核心）
 # -----------------------------
-STORAGE="overlay2"
-if [ "$VIRT" = "openvz" ] || [ "$VIRT" = "lxc" ]; then
-    STORAGE="vfs"
-fi
-
-echo "🧠 使用存储驱动: $STORAGE"
+STORAGE="vfs"
+echo "🧠 强制存储驱动: vfs（OpenVZ 兼容）"
 
 # -----------------------------
-# 5️⃣ 自动生成 IPv6 子网（避免冲突）
+# 5️⃣ 随机 IPv6 子网（避免冲突）
 # -----------------------------
 HEX=$(hexdump -n2 -e '/2 "%04x"' /dev/urandom)
-IPV6_SUBNET="fd00:${HEX}:dead::/64"
-IPV6_GATEWAY="fd00:${HEX}:dead::1"
+IPV6_SUBNET="fd00:${HEX}:beef::/64"
+IPV6_GATEWAY="fd00:${HEX}:beef::1"
 
 echo "🌐 IPv6 子网: $IPV6_SUBNET"
 
 # -----------------------------
-# 6️⃣ 写入 daemon.json
+# 6️⃣ 写入 Docker 配置
 # -----------------------------
 mkdir -p /etc/docker
 cat > /etc/docker/daemon.json <<EOF
@@ -74,10 +58,24 @@ cat > /etc/docker/daemon.json <<EOF
 EOF
 
 # -----------------------------
-# 7️⃣ 启动 Docker
+# 7️⃣ 清理旧 Docker（关键）
+# -----------------------------
+echo "🧹 清理旧 Docker..."
+killall dockerd 2>/dev/null || true
+killall containerd 2>/dev/null || true
+
+rm -f /var/run/docker.pid
+rm -f /var/run/docker.sock
+
+# ⚠️ 强制清数据（避免 overlay2 残留）
+rm -rf /var/lib/docker/*
+
+sleep 2
+
+# -----------------------------
+# 8️⃣ 启动 Docker
 # -----------------------------
 echo "⚡ 启动 Docker..."
-killall dockerd 2>/dev/null || true
 dockerd > /var/log/docker.log 2>&1 &
 
 # 等待启动
@@ -97,21 +95,20 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # -----------------------------
-# 8️⃣ IPv6 转发
+# 9️⃣ IPv6 配置
 # -----------------------------
-echo "🌐 启用 IPv6 转发..."
+echo "🌐 启用 IPv6..."
 sysctl -w net.ipv6.conf.all.forwarding=1
 
-# NAT（如果支持）
 if ip6tables -t nat -L >/dev/null 2>&1; then
     ip6tables -t nat -A POSTROUTING -s $IPV6_SUBNET ! -o docker0 -j MASQUERADE || true
-    echo "✅ IPv6 NAT 已配置"
+    echo "✅ IPv6 NAT 已启用"
 else
-    echo "⚠️ IPv6 NAT 不支持（OpenVZ 常见）"
+    echo "⚠️ IPv6 NAT 不支持（OpenVZ 正常现象）"
 fi
 
 # -----------------------------
-# 9️⃣ 创建 IPv6 网络（安全）
+# 🔟 创建 IPv6 网络
 # -----------------------------
 echo "🔧 创建 IPv6 网络..."
 
@@ -123,16 +120,17 @@ docker network create \
   ipv6bridge || true
 
 # -----------------------------
-# 🔟 完成
+# ✅ 完成
 # -----------------------------
 echo ""
-echo "🎉 安装完成！"
+echo "🎉 安装完成（无敌版）"
 echo "-----------------------------------"
 docker info | grep "Storage Driver"
 echo "-----------------------------------"
 echo "💡 IPv6 网络: ipv6bridge"
-echo "💡 测试命令:"
+echo ""
+echo "🧪 测试："
 echo "docker run --rm --network ipv6bridge alpine ping6 -c 2 google.com"
 echo ""
-echo "💡 host 网络模式（你现在用的）："
-echo "👉 docker-compose 直接用 network_mode: host 即可"
+echo "💡 host 模式（你用的）："
+echo "👉 docker-compose 直接 network_mode: host"
