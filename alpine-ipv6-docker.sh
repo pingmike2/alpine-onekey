@@ -1,20 +1,22 @@
 #!/bin/sh
 # =========================================================
-# Alpine 一键 IPv6 Docker 安装 + IPv6 NAT 配置 + Docker IPv6 网络
+# Alpine 3.14 OpenVZ/LXC 一键 IPv6 Docker 安装脚本
 # =========================================================
 set -e
 
-echo "🚀 开始安装 Docker + Docker Compose + IPv6..."
+echo "🚀 Alpine 一键安装 Docker + Docker Compose + IPv6 (OpenVZ/LXC 优化版)"
 
 # -----------------------------
-# 1️⃣ 更新 APK 源 & 安装基础工具
+# 1️⃣ 安装基础工具
 # -----------------------------
+echo "📦 更新 APK 源并安装基础工具..."
 apk update
-apk add --no-cache bash curl iptables ip6tables socat openrc
+apk add --no-cache bash curl socat ip6tables openrc iptables
 
 # -----------------------------
 # 2️⃣ 安装 Docker
 # -----------------------------
+echo "🐳 安装 Docker..."
 apk add --no-cache docker
 
 # -----------------------------
@@ -28,50 +30,48 @@ if [ ! -f "$DOCKER_COMPOSE_BIN" ]; then
 fi
 
 # -----------------------------
-# 4️⃣ 启动 Docker 并开机自启
-# -----------------------------
-rc-update add docker boot
-service docker start
-
-# -----------------------------
-# 5️⃣ 配置 Docker IPv6 网络
+# 4️⃣ 配置 Docker daemon（IPv6 + 禁用 IPv4 NAT）
 # -----------------------------
 DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
-
-# 默认 IPv6 子网，可根据 VPS 分配修改
 DEFAULT_IPV6_SUBNET="fd00:dead:beef::/48"
 
-if [ ! -f "$DOCKER_DAEMON_JSON" ]; then
-    echo "🔧 创建 Docker daemon.json 配置..."
-    cat > "$DOCKER_DAEMON_JSON" <<EOF
+echo "🔧 配置 Docker daemon.json..."
+mkdir -p /etc/docker
+cat > "$DOCKER_DAEMON_JSON" <<EOF
 {
   "ipv6": true,
-  "fixed-cidr-v6": "$DEFAULT_IPV6_SUBNET"
+  "fixed-cidr-v6": "$DEFAULT_IPV6_SUBNET",
+  "iptables": false,
+  "ip-masq": false
 }
 EOF
-else
-    echo "⚠️ daemon.json 已存在，请手动确保 ipv6 配置存在"
+
+# -----------------------------
+# 5️⃣ 后台启动 Docker daemon
+# -----------------------------
+echo "⚡ 启动 Docker daemon..."
+dockerd -H unix:///var/run/docker.sock > /var/log/docker.log 2>&1 &
+sleep 5
+
+# 检查 Docker 是否启动成功
+if ! docker info >/dev/null 2>&1; then
+    echo "❌ Docker daemon 启动失败，请检查 /var/log/docker.log"
+    exit 1
 fi
+echo "✅ Docker daemon 已启动"
 
 # -----------------------------
-# 6️⃣ 重启 Docker 生效 IPv6
-# -----------------------------
-service docker restart
-
-# -----------------------------
-# 7️⃣ 配置 IPv6 NAT 转发（让容器能访问公网 IPv6）
+# 6️⃣ 配置 IPv6 NAT（容器可访问公网 IPv6）
 # -----------------------------
 echo "🌐 配置 IPv6 NAT..."
-# 启用内核转发
 sysctl -w net.ipv6.conf.all.forwarding=1
-
-# 添加 ip6tables NAT 规则
 ip6tables -t nat -A POSTROUTING -s $DEFAULT_IPV6_SUBNET ! -o docker0 -j MASQUERADE || true
 
 # -----------------------------
-# 8️⃣ 创建 Docker 默认 IPv6 网络（容器默认使用）
+# 7️⃣ 创建 Docker 默认 IPv6 网络
 # -----------------------------
-docker network rm bridge || true
+echo "🔧 创建默认 IPv6 bridge 网络..."
+docker network rm bridge >/dev/null 2>&1 || true
 docker network create \
   --ipv6 \
   --subnet=$DEFAULT_IPV6_SUBNET \
@@ -81,12 +81,12 @@ docker network create \
   bridge
 
 # -----------------------------
-# 9️⃣ 验证安装
+# 8️⃣ 验证安装
 # -----------------------------
-echo "✅ 验证 Docker 与 Docker Compose..."
+echo "🎉 安装完成！"
+echo "📌 Docker IPv6 默认子网: $DEFAULT_IPV6_SUBNET"
+echo "💡 测试 Docker IPv6:"
+echo "docker run --rm alpine ping6 -c 2 google.com"
+
 docker version
 docker-compose version
-
-echo "🎉 安装完成！Docker 已开启 IPv6。"
-echo "🌐 默认 IPv6 子网：$DEFAULT_IPV6_SUBNET"
-echo "💡 容器默认网络已开启 IPv6，自动获取 IPv6 并可访问公网。"
