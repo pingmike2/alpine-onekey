@@ -3,6 +3,9 @@
 # alpine-optimize-safe.sh  v2 (2026-10-24)
 # 面向 Alpine / OpenVZ / LXC 小鸡的安全优化脚本
 #
+# 免责：按"现状"提供，无任何担保。会改 sshd / sysctl / apk 源等系统配置，
+#       跑之前先 --dry-run、自己备份，失联或数据丢失自负。License: MIT
+#
 # 相对 v1 的修复：
 #   1. 不再把 apk 源改写成 latest-stable（会跨大版本漂移），保持当前版本分支
 #   2. Port 不再"没写就追加 PORT"，改为先探测 sshd 真实监听端口；

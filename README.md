@@ -35,3 +35,19 @@ curl -fsSL https://raw.githubusercontent.com/pingmike2/alpine-onekey/main/alpine
 ```
 
 注意：该脚本会清空 `/var/lib/docker`（`rm -rf /var/lib/docker/*`），已有容器和镜像会丢。
+
+## 3. 免责声明
+
+一句话：**这些脚本会真改你的系统，出事自己担。**
+
+说细一点：
+
+- 脚本动的是 apk 源、sshd、sysctl、docker 这类底层配置，不是装个软件那么简单。**跑之前先看代码**，至少看一眼 `--dry-run` 的输出。
+- NAT / OpenVZ / LXC 小鸡上，SSH 相关配置改错就是直接失联，宿主商也没义务帮你救。v2 已经做了端口防护 + 校验 + 自动回滚，但你手动改端口不在这套防护范围内。
+- `alpine-ipv6-docker.sh` 会执行 `rm -rf /var/lib/docker/*`，已有容器、镜像、数据卷一起没。有东西就别跑。
+- 我不对任何数据丢失、服务中断、机器失联、IP 被封、账号被停机负责。脚本按"现状"给，不承诺适配你的环境，也不承诺以后一直能跑。
+- 唯一建议：**先在测试机上跑，重要机器先打快照**。没快照就别在只有一台的生产机上试。
+
+## 4. 许可
+
+MIT，见 [LICENSE](LICENSE)。随便用、随便改、随便改完再发，别来找我背锅就行。
