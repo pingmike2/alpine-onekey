@@ -1,6 +1,6 @@
 #!/bin/sh
 # =========================================================
-# alpine-optimize-safe.sh  v3 (2026-10-25)
+# alpine-optimize-safe.sh  v4 (2026-10-25)
 # 面向 Alpine / OpenVZ / LXC 小鸡的安全优化脚本
 #
 # 免责：按"现状"提供，无任何担保。会改 sshd / sysctl / apk 源等系统配置，
@@ -25,6 +25,11 @@
 #   9. 第 2 步增加 cgroup 内存余量检查：<128MB 时跳过 upgrade 与安装，
 #      避免 apk 在小内存 cgroup 里把页缓存撑爆、OOM 杀掉 sshd/sing-box。
 #
+# 相对 v3 的修复（2026-10-25 实机验证 celery ck25: Oracle LXC 后）：
+#   10. 统一 detect_sshd_port()：ss -> netstat -> sshd_config 显式 Port 三级
+#       兜底。mini 镜像常没装 iproute2（无 ss），v3 硬用 ss 读到空，
+#       把"重启后仍在监听"误判成"异常回滚"，白白多一次 sshd 重启。
+#
 # 用法：
 #   sh alpine-optimize-safe.sh --dry-run     # 只看会做什么，不改系统
 #   sh alpine-optimize-safe.sh               # 执行（不改 SSH 端口）
@@ -48,6 +53,27 @@ ok()   { printf '   \033[1;32m✓\033[0m %s\n' "$*"; }
 warn() { printf '   \033[1;33m!\033[0m %s\n' "$*"; }
 bad()  { printf '   \033[1;31m✗\033[0m %s\n' "$*"; }
 doit() { if [ "$DRY" = "1" ]; then printf '   [dry-run] %s\n' "$*"; else sh -c "$*"; fi; }
+
+# 探测 sshd 实际监听端口。Alpine mini 容器常没装 iproute2（无 ss），
+# 这里 ss -> netstat -> sshd_config 显式 Port -> 默认 22 多级兜底，
+# 避免 ss 不存在时误读为空、把"重启后仍在监听"判成"异常回滚"（v3 实机复现）。
+detect_sshd_port() {
+  local p
+  if command -v ss >/dev/null 2>&1; then
+    p=$(ss -lntp 2>/dev/null | awk '/sshd/{split($4,a,":"); print a[length(a)]}' | head -1)
+    [ -n "$p" ] && { printf '%s' "$p"; return; }
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    p=$(netstat -lntp 2>/dev/null | awk '/sshd/{split($4,a,":"); print a[length(a)]}' | head -1)
+    [ -n "$p" ] && { printf '%s' "$p"; return; }
+  fi
+  # 兜底：无 ss/netstat 时读 sshd_config 显式 Port；没有则默认 22。
+  # （/proc/net/tcp 无法可靠反查属主 pid，纯端口列表会把其他侦听误当 sshd，
+  #   而 mini 镜像 ssh 基本就是 22/显式 Port，故以 config 为准。）
+  p=$(awk '/^[[:space:]]*Port[[:space:]]/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
+  [ -n "$p" ] && { printf '%s' "$p"; return; }
+  printf '22'
+}
 
 [ -f /etc/alpine-release ] || { bad "这不是 Alpine，退出"; exit 1; }
 MEM_RAW=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)
@@ -135,7 +161,7 @@ fi
 
 # ---------- 6. SSH（最高风险步骤） ----------
 say "6/7 SSH 加固"
-CUR_PORT=$(ss -lntp 2>/dev/null | awk '/sshd/{split($4,a,":"); print a[length(a)]}' | head -1)
+CUR_PORT=$(detect_sshd_port)
 [ -n "$CUR_PORT" ] || CUR_PORT=22
 ok "sshd 实际监听端口: $CUR_PORT"
 
@@ -187,7 +213,7 @@ if [ "$DRY" = "0" ]; then
     ok "sshd -t 校验通过"
     rc-service sshd restart >/dev/null 2>&1
     sleep 2
-    NEW_PORT=$(ss -lntp 2>/dev/null | awk '/sshd/{split($4,a,":"); print a[length(a)]}' | head -1)
+    NEW_PORT=$(detect_sshd_port)
     if [ "$NEW_PORT" = "$CUR_PORT" ] && rc-service sshd status >/dev/null 2>&1; then
       ok "sshd 重启后仍在 $NEW_PORT 监听，连接安全"
     else
@@ -292,7 +318,7 @@ doit "apk cache clean" >/dev/null 2>&1 || true
 if [ "$DRY" = "0" ]; then
   echo "   拥塞控制 : $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
   echo "   somaxconn: $(sysctl -n net.core.somaxconn 2>/dev/null)"
-  echo "   SSH 端口 : $(ss -lntp 2>/dev/null | awk '/sshd/{split($4,a,":"); print a[length(a)]}' | head -1)"
+  echo "   SSH 端口 : $(detect_sshd_port)"
   echo "   磁盘可用 : $(df -Pm / | awk 'NR==2{print $4}') MB"
   echo "   服务状态 : $(for s in sshd sing-box argo komari-agent; do rc-service $s status >/dev/null 2>&1 && printf '%s=ok ' $s; done)"
   echo "   时间     : $(date '+%F %T %Z')"
