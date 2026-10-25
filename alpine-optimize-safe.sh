@@ -1,6 +1,6 @@
 #!/bin/sh
 # =========================================================
-# alpine-optimize-safe.sh  v2 (2026-10-24)
+# alpine-optimize-safe.sh  v3 (2026-10-25)
 # 面向 Alpine / OpenVZ / LXC 小鸡的安全优化脚本
 #
 # 免责：按"现状"提供，无任何担保。会改 sshd / sysctl / apk 源等系统配置，
@@ -14,6 +14,16 @@
 #   4. 去掉 set -e，每步失败只告警不中断
 #   5. apk upgrade 改为显式 --upgrade 才执行，并检查磁盘余量
 #   6. 只写内核真正允许写的 sysctl 键，并落 /etc/local.d 持久化
+#
+# 相对 v2 的修复（2026-10-25 实机验证 Oracle LXC 后）：
+#   7. bbr 只在 net.ipv4.tcp_available_congestion_control 真含 bbr 时才写入。
+#      v2 无条件写 bbr，宿主没编模块时内核拒绝、只打一行 warn，收尾汇总
+#      仍显示"拥塞控制: cubic"，看起来优化做了其实没做。
+#   8. rc-update add local default 之后补 rc-service local start。
+#      Alpine 默认 local runlevel = stopped，只 add 不 start 时这一台不重启
+#      就一直靠 sysctl -w 撑着，重启后全部回退。
+#   9. 第 2 步增加 cgroup 内存余量检查：<128MB 时跳过 upgrade 与安装，
+#      避免 apk 在小内存 cgroup 里把页缓存撑爆、OOM 杀掉 sshd/sing-box。
 #
 # 用法：
 #   sh alpine-optimize-safe.sh --dry-run     # 只看会做什么，不改系统
@@ -62,12 +72,27 @@ if [ "$DRY" = "0" ]; then
 fi
 doit "apk update -q" || warn "apk update 失败（源不可达），后续安装会跳过"
 
-# ---------- 2. 磁盘余量 ----------
-say "2/7 磁盘余量检查"
+# ---------- 2. 磁盘 + cgroup 内存余量 ----------
+say "2/7 磁盘与内存余量检查"
 AVAIL_MB=$(df -Pm / | awk 'NR==2{print $4}')
 ok "根分区可用 ${AVAIL_MB} MB"
+
+# cgroup 内存（v3）：apk upgrade 会把页缓存撑大，小内存容器里 OOM killer
+# 第一个杀的是最近换页的进程 —— sshd / sing-box。留不出 96MB 就不碰升级。
+MEM_USED_MB=$(cat /sys/fs/cgroup/memory.current 2>/dev/null | awk '{printf "%d", $1/1048576}')
+MEM_AVAIL_MB=""
+if [ -n "$MEM_RAW" ] && [ "$MEM_RAW" != "0" ]; then
+  MEM_AVAIL_MB=$((MEM_RAW/1048576 - ${MEM_USED_MB:-0}))
+  ok "cgroup 内存余量 ${MEM_AVAIL_MB} MB（上限 $((MEM_RAW/1048576)) MB / 已用 ${MEM_USED_MB:-0} MB）"
+else
+  warn "cgroup 内存无上限或不可读，跳过内存检查"
+fi
+
 if [ "$AVAIL_MB" -lt 200 ]; then
   warn "可用空间 <200MB，跳过所有安装/升级"
+  DO_UPGRADE=0; SKIP_INSTALL=1
+elif [ -n "$MEM_AVAIL_MB" ] && [ "$MEM_AVAIL_MB" -lt 96 ]; then
+  warn "cgroup 内存余量 ${MEM_AVAIL_MB}MB <96MB，跳过安装/升级（OOM 会先杀 sshd/sing-box）"
   DO_UPGRADE=0; SKIP_INSTALL=1
 else
   SKIP_INSTALL=0
@@ -182,31 +207,59 @@ fi
 say "7/7 内核参数（只写容器允许的键）"
 SYSCTL_FILE=/etc/sysctl.d/99-alpine-optimize.conf
 doit "mkdir -p /etc/sysctl.d"
+
+# bbr（v3）：只有内核真列出 bbr 才写。Oracle/OpenVZ/多数 LXC 宿主没编 bbr 模块，
+# v2 无条件写时 sysctl -w 直接被拒、只打一行 warn，收尾汇总照旧显示 cubic。
+AVAIL_CC=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "")
+if printf '%s' " $AVAIL_CC " | grep -qw bbr; then
+  bbr_line="net.ipv4.tcp_congestion_control=bbr"
+  ok "内核支持 bbr（可用: $AVAIL_CC），写入拥塞控制"
+else
+  bbr_line=""
+  warn "内核不支持 bbr（可用: ${AVAIL_CC:-无法读取}），跳过拥塞控制改动"
+fi
+
+# 键列表只定义一次：写入文件和下面的 sysctl -w 都从这里取，
+# 避免 dry-run 不写文件、下面却无条件读 $SYSCTL_FILE 而崩（v3 实机复现）
+build_keys() {
+  printf '%s\n' \
+    'net.ipv4.tcp_fastopen=3' \
+    'net.ipv4.tcp_slow_start_after_idle=0' \
+    'net.ipv4.tcp_mtu_probing=1' \
+    'net.ipv4.tcp_fin_timeout=15' \
+    'net.ipv4.tcp_tw_reuse=1' \
+    'net.ipv4.tcp_keepalive_time=120' \
+    'net.ipv4.tcp_max_syn_backlog=4096' \
+    'net.core.somaxconn=4096' \
+    'net.ipv4.ip_local_port_range=10000 65000' \
+    ${bbr_line:+"$bbr_line"}
+}
+
 if [ "$DRY" = "0" ]; then
-  cat > "$SYSCTL_FILE" <<'EOF'
-# alpine-optimize-safe.sh v2 生成；只含本机实测可写的键
-net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_slow_start_after_idle=0
-net.ipv4.tcp_mtu_probing=1
-net.ipv4.tcp_fin_timeout=15
-net.ipv4.tcp_tw_reuse=1
-net.ipv4.tcp_keepalive_time=120
-net.ipv4.tcp_max_syn_backlog=4096
-net.core.somaxconn=4096
-net.ipv4.ip_local_port_range=10000 65000
-net.ipv4.tcp_congestion_control=bbr
-EOF
+  { printf '# alpine-optimize-safe.sh v3 生成；只含本机实测可写的键\n'
+    build_keys
+  } > "$SYSCTL_FILE"
 fi
 
 APPLIED=0; FAILED=0
-while IFS= read -r kv; do
-  case "$kv" in ''|'#'*) continue ;; esac
+apply_kv() {
+  kv="$1"
+  case "$kv" in ''|'#'*) return 0 ;; esac
   if [ "$DRY" = "1" ]; then
     printf '   [dry-run] sysctl -w %s\n' "$kv"
-    continue
+    return 0
   fi
-  if sysctl -w "$kv" >/dev/null 2>&1; then APPLIED=$((APPLIED+1)); else FAILED=$((FAILED+1)); warn "写入被拒: $kv"; fi
-done < "$SYSCTL_FILE"
+  if sysctl -w "$kv" >/dev/null 2>&1; then
+    APPLIED=$((APPLIED+1))
+  else
+    FAILED=$((FAILED+1)); warn "写入被拒: $kv"
+  fi
+}
+if [ "$DRY" = "1" ]; then
+  build_keys | while IFS= read -r kv; do apply_kv "$kv"; done
+else
+  while IFS= read -r kv; do apply_kv "$kv"; done < "$SYSCTL_FILE"
+fi
 [ "$DRY" = "0" ] && ok "生效 $APPLIED 项，被拒 $FAILED 项"
 
 # 开机自动应用（容器重启后 sysctl 会丢）
@@ -223,7 +276,14 @@ exit 0
 EOF
   chmod +x /etc/local.d/99-alpine-optimize.start
   rc-update add local default >/dev/null 2>&1 || true
-  ok "已写入 /etc/local.d 并在 default runlevel 启用 local"
+  # v3：Alpine 默认 local runlevel = stopped，只 add 不 start 时这一台当前
+  # 全靠上面的 sysctl -w 撑着，容器一重启 10 项全部回退。
+  if rc-service local status >/dev/null 2>&1; then
+    ok "local 已在 default runlevel 且正在运行"
+  else
+    rc-service local start >/dev/null 2>&1 && ok "local 已启动，重启后 sysctl 会自动恢复" \
+      || warn "local 启动失败，当前 sysctl 只在本次运行有效（重启后回退）"
+  fi
 fi
 
 # ---------- 收尾 ----------
